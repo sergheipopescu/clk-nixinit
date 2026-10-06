@@ -1,0 +1,110 @@
+server {											# start HTTPs server block
+
+	server_name $fqdn;									# domain bindings
+	root /var/www/$fqdn;									# webroot
+	index index.php index.html index.htm;							# directory index
+
+
+	###
+	## SSL Settings
+	###
+
+	listen 443 ssl;										# default SSL port
+#	listen 9443 ssl proxy_protocol;								# proxy SSL port
+	ssl_certificate /etc/letsencrypt/live/$fqdn/fullchain.pem;				# SSL certificate
+	ssl_certificate_key /etc/letsencrypt/live/$fqdn/privkey.pem;				# SSL private key
+
+
+	###
+	## Real IP (if using proxy_protocol)
+	###
+
+#	set_real_ip_from 127.0.0.1;								# Set real IP
+#	real_ip_header proxy_protocol;								# Real IP header
+
+
+	###
+	## Logging
+	###
+
+	include /etc/nginx/snippets/clk.ngx.lognone.snip;					# logging exclusions / activated by snippet
+	access_log /var/log/nginx/$fqdn.443.access.log loghost if=$mainlog;			# access log
+	error_log /var/log/nginx/$fqdn.443.error.log error;					# error log
+	access_log /var/log/nginx/$fqdn.444.blockbots.log loghost if=$return_444;		# 444 returns log / activated by snippet
+
+
+	###
+	## nginx Bad Bot Blocker configs
+	###
+
+	include /etc/nginx/bots.d/ddos.conf;
+	include /etc/nginx/bots.d/blockbots.conf;
+
+
+	###
+	## Access list
+	###
+
+#        include /etc/nginx/snippets/clk.ngx.acl.snip;
+
+
+	###
+	## Serve the site
+	###
+
+	location / {
+		try_files $uri $uri/ /index.php?$args;						# pretty urls, wordpress style
+	}
+
+	location ~ \.php$ {
+		include snippets/fastcgi-php.conf;						# split path info, set SCRIPT_FILENAME
+		fastcgi_pass unix:/run/php/php$phpvrs-fpm.sock;					# hand off to the fpm pool
+	}
+
+	location ~ /\. {
+		deny all;									# no dotfiles, ever
+	}
+
+	location = /favicon.ico {
+		access_log off;
+		log_not_found off;
+	}
+
+}												# end of HTTPs block
+
+
+
+server {											# start of HTTP block
+
+	server_name $fqdn;									# server name
+
+	listen 80;										# HTTP port
+
+
+	###
+	## Logging
+	###
+
+	include /etc/nginx/snippets/clk.ngx.lognone.snip;					# logging exclusions / activated by snippet
+	access_log /var/log/nginx/$fqdn.80.access.log loghost if=$mainlog;			# access log
+	error_log /var/log/nginx/$fqdn.80.error.log error;					# error log
+	access_log /var/log/nginx/$fqdn.804.blockbots.log loghost if=$return_444;		# 444 returns log / activated by snippet
+
+
+	###
+	## Nginx Bad Bot Blocker Includes
+	###
+
+	include /etc/nginx/bots.d/ddos.conf;
+	include /etc/nginx/bots.d/blockbots.conf;
+
+
+	###
+	## Redirect all requests to https
+	###
+
+	location / {
+		return 301 https://$fqdn$request_uri;
+	}
+
+}												# end of HTTP block

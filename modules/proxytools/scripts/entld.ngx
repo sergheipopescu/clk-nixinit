@@ -1,0 +1,194 @@
+#!/bin/bash
+# shellcheck disable=SC2016  # envsubst wants the literal placeholder names
+#
+# clk-nixinit :: entld.ngx
+# enter/enable domain, nginx proxy flavour - renders a server block that forwards
+# to a backend and gets it a certificate. No database, no ftp account: a proxy
+# hosts nothing itself.
+#
+# usage: entld.ngx [-b http://backend:port] fqdn [fqdn ...]
+
+##
+# Variables
+##
+
+set -a											# export all variables
+
+clkprofile=/etc/clickwork/nixinit.conf							# install profile
+
+cln=$(echo -en '\033[0m')
+red=$(echo -en '\033[0;31m')
+grn=$(echo -en '\033[32m')
+ylw=$(echo -en '\033[33m')
+cyn=$(echo -en '\033[36m')
+bred=$(echo -en '\033[1;91m')
+
+profile_get() {
+
+	[ -f "$clkprofile" ] || { echo "$2"; return 0; }
+	local val
+	val=$(sed -n "s/^$1=\"\(.*\)\"$/\1/p" "$clkprofile" | tail -n 1)
+	echo "${val:-$2}"
+}
+
+certmail=$(profile_get cert_email certs@clickwork.ro)					# certbot registration address
+backendport=$(profile_get backend_port 9080)						# default local backend port
+
+# shellcheck disable=SC2034  # consumed by envsubst further down
+upstream=${CLK_UPSTREAM:-http://127.0.0.1:$backendport}					# where this proxy forwards to
+
+veveve=""										# www suffix for the certificate request
+httponly=no										# -8 builds a port 80 forward instead
+
+
+##
+# Functions
+##
+
+okay() {
+	echo -e "\b\b[${grn} OK ${cln}]\n"						# print okay function
+}
+
+fail() {
+	echo -e "\n ${bred}Certbot errored out${cln}\n"; rm -f /etc/nginx/sites-available/"$fqdn"; exit 1
+}
+
+spinny() {
+	while :; do for c in / - \\ \|; do printf '%s\b' "$c"; sleep 0.1; done; done	# spinner
+}
+
+makespin() {
+
+	spinny &
+	local spin=$!
+
+	if eval "$*" &>/dev/null; then
+		kill "$spin" 2>/dev/null; wait "$spin" 2>/dev/null
+		okay
+	else
+		kill "$spin" 2>/dev/null; wait "$spin" 2>/dev/null
+		fail
+	fi
+}
+
+vhost()	{
+
+	< /etc/nginx/blocks/ngx.srvblock envsubst '$fqdn $upstream' |			# substitute current variables in read vhost
+	tee /etc/nginx/sites-available/"$fqdn" > /dev/null				# write nginx config file
+}
+
+whost()	{
+
+	< /etc/nginx/blocks/ngx.srwblock envsubst '$fqdn' |				# substitute current variable in read vhost
+	tee --append /etc/nginx/sites-available/"$fqdn" > /dev/null			# append to the nginx config file
+}
+
+# Port 80 only, for a domain whose 443 HAProxy passes straight through to a
+# remote. Nothing is terminated here, so there is no certificate to ask for.
+fwdhost() {
+
+	< /etc/nginx/blocks/ngx.fwd80block envsubst '$fqdn $upstream' |			# substitute current variables in read vhost
+	tee /etc/nginx/sites-available/"$fqdn" > /dev/null				# write nginx config file
+}
+
+getcert() {
+
+	certbot certonly --nginx --non-interactive --agree-tos --quiet -m "$certmail" -d "$fqdn$veveve"
+}
+
+engxsite() {
+
+	ln -sf /etc/nginx/sites-available/"$fqdn" /etc/nginx/sites-enabled/"$fqdn" ; echo -e "${cyn}$fqdn${cln} nginx site ${grn}enabled${cln}\n";
+}
+
+# Provision one domain. An apex domain also gets the www redirect, a subdomain
+# only gets the plain server block.
+entld_one() {
+
+	if [ -f /etc/nginx/sites-available/"$fqdn" ]; then
+
+		echo -e "Server block ${cyn}$fqdn${cln} ${ylw}exists${cln}\n"
+		return 1
+	fi
+
+	# http-only: 443 belongs to the remote, so build the forward block and stop
+	if [ "$httponly" = yes ]; then
+
+		fwdhost
+		echo -e "${cyn}$fqdn${cln} port 80 forward to ${cyn}$upstream${cln} ${grn}created${cln}\n"
+		engxsite
+		return 0
+	fi
+
+	if [[ "$fqdn" = *.*.* ]]; then							# if a subdomain exists
+
+		veveve=""
+		vhost
+
+	elif [[ "$fqdn" = *.* ]]; then							# if there is no subdomain
+
+		veveve=",www.$fqdn"
+		vhost
+		whost
+
+	else										# if the argument is not a domain
+
+		echo -e "\n ${bred} Wrong domain format.${cln}  ${red} Try again. ${cln}\n"	# print error
+		return 1
+	fi
+
+	echo -n "Getting certificate for $fqdn ..................   "
+	makespin "getcert"
+	engxsite
+}
+
+
+##
+# Flags
+##
+
+while getopts ":b:8h" flag; do
+
+	case "${flag}" in
+
+		b)	upstream=$OPTARG					;;
+		8)	httponly=yes						;;
+		h)	echo -e "\nentld.ngx usage: \n\n-b <http://backend:port> backend to forward to; \n-8             port 80 only, no TLS and no certificate, for a domain\n               whose 443 is passed through to a remote backend; \nfqdn [fqdn ...] domains to enable\n"; exit 0 ;;
+		*)	echo -e "\n ${bred} Error! Invalid option${cln}${red} -$OPTARG${cln} \n"; exit 1 ;;
+	esac
+done
+
+shift $((OPTIND - 1))
+
+
+##
+# Script
+##
+
+# cursor off
+tput civis
+
+if [[ "$*" == "" ]]; then								# if no arguments
+
+	echo
+
+	read -r -p "Enter domain name: " fqdn						# ask for domain and read input
+	read -r -p "Enter backend [$upstream]: " reply					# ask for the backend and read input
+	upstream=${reply:-$upstream}
+
+	echo
+
+	entld_one || { tput cnorm; exit 1; }
+
+else											# if arguments exist
+
+	for fqdn in "$@"; do								# for each argument
+
+		entld_one || { tput cnorm; exit 1; }
+	done
+fi
+
+# Cursor on
+tput cnorm
+
+lampstart

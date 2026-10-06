@@ -1,0 +1,54 @@
+#cloud-config
+#
+# clk-nixinit cloud-init bootstrap
+#
+# Paste this into the "user data" field of a fresh Ubuntu KVM instance. It runs
+# once, on first boot, as root, with no tty - so clk-nixinit.sh takes every
+# choice from the CLK_ variables below and never prompts.
+#
+# Edit the write_files block: at minimum CLK_FQDN and CLK_ROLE.
+#
+#   CLK_ROLE       core | lamp | lemp | proxy   (defaults to core if unset)
+#   CLK_FQDN       the server hostname fqdn
+#   CLK_PHP        php versions, comma separated, highest becomes the default
+#                  "latest" (the default) resolves to the newest the repo has
+#   CLK_ADMIN_USER admin username, defaults to the release codename
+#   CLK_TIMEZONE   server timezone
+#   CLK_HQ_IPS     allowlist for phpMyAdmin and the wildcard tools
+#   CLK_ALERT_EMAIL  lfd alert recipient
+#   CLK_CERT_EMAIL   certbot registration address
+#   CLK_CLEANUP    1 removes the checkout when the run finishes (default: left in place)
+#   CLK_REBOOT     0 skips the reboot when the run finishes (default: reboots)
+
+package_update: true
+
+packages:
+  - git
+
+write_files:
+  - path: /etc/clk-nixinit.env
+    permissions: '0600'
+    content: |
+      CLK_ROLE=lamp
+      CLK_FQDN=vps1.example.ro
+      CLK_PHP=latest
+      CLK_TIMEZONE=Europe/Bucharest
+      CLK_HQ_IPS=82.77.232.163
+      CLK_ALERT_EMAIL=alerts@clickwork.ro
+      CLK_CERT_EMAIL=certs@clickwork.ro
+      CLK_YES=1
+      CLK_CLEANUP=1
+
+runcmd:
+  # Point this at wherever clk-nixinit lives. Swap the clone for a tarball
+  # fetch, or for a write_files payload, if the box has no access to the repo.
+  - [ git, clone, --depth, '1', 'https://github.com/sergheipopescu/clk-nixinit', /opt/clk-nixinit ]
+  - [ chmod, +x, /opt/clk-nixinit/clk-nixinit.sh ]
+  - |
+    set -a
+    . /etc/clk-nixinit.env
+    set +a
+    /opt/clk-nixinit/clk-nixinit.sh 2>&1 | tee /var/log/clk-nixinit.cloud-init.log
+
+# The provisioner reboots itself by default, so cloud-init does not need a
+# power_state block of its own. Set CLK_REBOOT=0 above to skip that.

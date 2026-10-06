@@ -1,0 +1,12 @@
+# Legacy Clickwork scripts, kept locally as reference during the rewrite.
+# Not part of this project's history.
+old_sources/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Local working notes for Claude Code, not part of the project
+CLAUDE.md

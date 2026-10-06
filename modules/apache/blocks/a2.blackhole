@@ -1,0 +1,6 @@
+<VirtualHost *:$backendport>
+	ServerName CygX1
+	Redirect 403
+	ErrorLog /var/log/apache2/error.log
+	CustomLog /var/log/apache2/access.log loghost
+</VirtualHost>

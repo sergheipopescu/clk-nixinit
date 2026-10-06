@@ -1,0 +1,46 @@
+server {											# port 80 forward, no TLS here
+
+	server_name $fqdn;									# domain bindings
+
+	listen 80;										# HTTP port
+
+
+	###
+	## Logging
+	###
+
+	include /etc/nginx/snippets/clk.ngx.lognone.snip;					# logging exclusions / activated by snippet
+	access_log /var/log/nginx/$fqdn.80.access.log loghost if=$mainlog;			# access log
+	error_log /var/log/nginx/$fqdn.80.error.log error;					# error log
+	access_log /var/log/nginx/$fqdn.804.blockbots.log loghost if=$return_444;		# 444 returns log / activated by snippet
+
+
+	###
+	## Nginx Bad Bot Blocker Includes
+	###
+
+	include /etc/nginx/bots.d/ddos.conf;
+	include /etc/nginx/bots.d/blockbots.conf;
+
+
+	###
+	## Access list
+	###
+
+#        include /etc/nginx/snippets/clk.ngx.acl.snip;
+
+
+	###
+	## Forward to the same backend HAProxy sends 443 to
+	###
+	## 443 is passed straight through to the remote by HAProxy, so nothing is
+	## terminated here and there is no certificate to hold. This block only
+	## gives port 80 a way to reach the same place -- the remote decides what
+	## to do with it, redirect included.
+	###
+
+	location / {
+		proxy_pass $upstream;								# forward to the remote backend
+	}
+
+}												# end of HTTP block

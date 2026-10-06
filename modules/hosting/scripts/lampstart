@@ -1,0 +1,89 @@
+#!/bin/bash
+#
+# clk-nixinit :: lampstart
+# Validate then reload the whole stack. The only place config validity is checked
+# before a reload, so route every config change through it.
+#
+# What it tests and reloads is read from the install profile, so the same script
+# serves a LAMP box, a LEMP box and a proxy.
+
+##
+# Variables
+##
+
+clkprofile=/etc/clickwork/nixinit.conf							# install profile
+
+cln=$(echo -en '\033[0m')
+grn=$(echo -en '\033[32m')
+cyn=$(echo -en '\033[36m')
+bred=$(echo -en '\033[1;91m')
+
+profile_get() {
+
+	[ -f "$clkprofile" ] || { echo "$2"; return 0; }
+	local val
+	val=$(sed -n "s/^$1=\"\(.*\)\"$/\1/p" "$clkprofile" | tail -n 1)
+	echo "${val:-$2}"
+}
+
+phpvrss=$(profile_get php "")								# php versions to test and reload
+
+reload=""										# services to reload once every test passes
+
+
+##
+# Test everything before touching anything
+##
+
+echo -e "${cyn}\n\n Reloading the stack ...${cln}\n"
+
+if command -v nginx &>/dev/null; then
+
+	echo -e "${cyn}testing nginx config ...${cln}"
+	sudo nginx -q -t || { echo -e "\n${bred}nginx config test failed. Review errors and retry${cln}\n"; exit 1; }
+	reload="$reload nginx"
+fi
+
+if command -v apachectl &>/dev/null; then
+
+	echo -e "${cyn}\ntesting apache config ...${cln}"
+	sudo apachectl -t || { echo -e "\n${bred}apache config test failed. Review errors and retry${cln}\n"; exit 1; }
+	reload="$reload apache2"
+fi
+
+for phpvrs in ${phpvrss//,/ }; do
+
+	command -v "php-fpm$phpvrs" &>/dev/null || continue
+
+	echo -e "${cyn}\ntesting php-fpm$phpvrs config ...${cln}"
+	sudo "php-fpm$phpvrs" -t || { echo -e "\n${bred}php-fpm$phpvrs config test failed. Review errors and retry${cln}\n"; exit 1; }
+	reload="$reload php$phpvrs-fpm"
+done
+
+if command -v haproxy &>/dev/null; then
+
+	echo -e "${cyn}\ntesting haproxy config ...${cln}"
+	hpxconf=""
+	[ -d /etc/haproxy/conf.d ] && hpxconf="-f /etc/haproxy/conf.d"			# generated backends, same set systemd loads
+
+	# shellcheck disable=SC2086  # deliberately unquoted, it is either empty or two words
+	sudo haproxy -c -f /etc/haproxy/haproxy.cfg $hpxconf || { echo -e "\n${bred}haproxy config test failed. Review errors and retry${cln}\n"; exit 1; }
+	reload="$reload haproxy"
+fi
+
+
+##
+# Everything passed, reload
+##
+
+# shellcheck disable=SC2086  # the service list is deliberately word split
+[ -n "$reload" ] && sudo systemctl reload $reload
+
+for svc in pure-ftpd-mysql postfix; do							# these want a restart, not a reload
+
+	systemctl list-unit-files "$svc.service" --no-legend 2>/dev/null | grep -q . && sudo systemctl restart "$svc"
+done
+
+echo
+# shellcheck disable=SC2034
+for run in {1..10}; do { echo -n "."; sleep 0.05; }; done; echo -e "${grn}   Stack reloaded! ${cln}\n"

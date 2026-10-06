@@ -1,0 +1,249 @@
+#!/bin/bash
+# shellcheck disable=SC2016  # envsubst wants the literal placeholder names
+#
+# clk-nixinit :: entld
+# enter/enable domain - provision a hosted domain: database, ftp user, vhost,
+# certificate and webroot. Works on a LAMP box and on a LEMP box, the difference
+# is read from the install profile.
+#
+# usage: entld [-p <php version>] [fqdn ...]
+
+##
+# Variables
+##
+
+set -a											# export all variables
+
+clkprofile=/etc/clickwork/nixinit.conf							# install profile
+
+cln=$(echo -en '\033[0m')
+red=$(echo -en '\033[0;31m')
+grn=$(echo -en '\033[32m')
+cyn=$(echo -en '\033[36m')
+bred=$(echo -en '\033[1;91m')
+
+profile_get() {
+
+	[ -f "$clkprofile" ] || { echo "$2"; return 0; }
+	local val
+	val=$(sed -n "s/^$1=\"\(.*\)\"$/\1/p" "$clkprofile" | tail -n 1)
+	echo "${val:-$2}"
+}
+
+mdbpass=$(sudo grep -oP "mariaDB password is:\s+\K\w+" /root/salt)			# get MariaDB root password
+mdbadmin=$(profile_get mariadb_admin mariadmin)						# mariadb superuser
+certmail=$(profile_get cert_email certs@clickwork.ro)					# certbot registration address
+# shellcheck disable=SC2034  # ftpuid, phpvrs and upstream are consumed by envsubst
+ftpuid=$(profile_get ftp_uid 2001)							# uid of the shared pftpd account
+# shellcheck disable=SC2034
+phpvrs=$(profile_get php_default 8.4)							# fpm pool this vhost runs on
+phpalt=""										# set by -p to pin a vhost elsewhere
+backendport=$(profile_get backend_port 9080)						# apache backend port
+# shellcheck disable=SC2034
+upstream="http://127.0.0.1:$backendport"						# what nginx forwards to on a LAMP box
+
+case " $(profile_get webserver) " in							# apache present means LAMP, otherwise LEMP
+	*\ apache\ *)	stack=lamp ;;
+	*)		stack=lemp ;;
+esac
+
+
+##
+# Functions
+##
+
+# A real domain name, so a typo or an empty argument can never reach the SQL
+validdomain() {
+
+	[[ $fqdn =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$ ]]
+}
+
+# How much of this domain is already on the box. A half torn down domain would
+# otherwise fail partway through provisioning, on CREATE DATABASE or worse.
+artifacts() {
+
+	local n=0 dbn ftpn
+
+	[ -f /etc/nginx/sites-available/"$fqdn" ] && n=$((n + 1))
+	[ -f /etc/apache2/sites-available/"$fqdn".conf ] && n=$((n + 1))
+	[ -d /var/www/"$fqdn" ] && n=$((n + 1))
+
+	dbn=$(mariadb -u"$mdbadmin" -p"$mdbpass" -N -B \
+		-e "SELECT COUNT(*) FROM mysql.user WHERE User='$fqdn' AND Host='localhost';" 2>/dev/null)
+	ftpn=$(mariadb -u"$mdbadmin" -p"$mdbpass" -N -B \
+		-e "SELECT COUNT(*) FROM pftpd.ftpd WHERE User='$fqdn';" 2>/dev/null)
+
+	echo $((n + ${dbn:-0} + ${ftpn:-0}))
+}
+
+dircnf() {
+
+	sudo mkdir -p /var/www/"$fqdn"			; echo -e "${cyn}$fqdn${cln} webroot directory ${grn}created${cln}\n";
+	sudo chmod -R 0750 /var/www/"$fqdn"		; echo -e "${cyn}$fqdn${cln} webroot directory permissions ${grn}set${cln}\n";
+	sudo chown -R pftpd:www-data /var/www/"$fqdn"	; echo -e "${cyn}$fqdn${cln} webroot directory owner and group ${grn}set${cln}\n";
+
+	if [ "$stack" = lamp ]; then
+		sudo ln -sf /etc/apache2/sites-available/"$fqdn".conf /etc/apache2/sites-enabled/"$fqdn".conf ; echo -e "${cyn}$fqdn${cln} apache site ${grn}enabled${cln}\n";
+	fi
+
+	sudo ln -sf /etc/nginx/sites-available/"$fqdn" /etc/nginx/sites-enabled/"$fqdn" ; echo -e "${cyn}$fqdn${cln} nginx site ${grn}enabled${cln}\n";
+}
+
+genpass() {
+
+	fqdnpass=$(openssl rand -base64 15)						# create random password for database/ftp
+	sodium=$(echo $RANDOM | md5sum | head -c 20)					# create random salt for argon2
+	argon=$(echo -n "$fqdnpass" | argon2 "$sodium" -id | grep Encoded | awk '{ print $2}')	# create argon2 hash of the password
+	echo -e "\nThe $fqdn password is:	$fqdnpass\nThe $fqdn argon hash is:	$argon" | sudo tee --append /root/salt > /dev/null;
+
+	echo -e 'CREATE DATABASE `$fqdn`;
+		GRANT SELECT, ALTER, INSERT, UPDATE, DELETE, CREATE, DROP ON `$fqdn`.* TO `$fqdn`@"localhost" IDENTIFIED BY "$fqdnpass";
+		FLUSH PRIVILEGES;
+		USE pftpd;
+		INSERT INTO ftpd (User, status, Password, Uid, Gid, Dir, ULBandwidth, DLBandwidth, comment, ipaccess, QuotaSize, QuotaFiles) VALUES ("$fqdn", "1", "$argon", "$ftpuid", "33", "/var/www/$fqdn", "0", "0", "", "*", "0", "0");
+	'| envsubst | mariadb -u"$mdbadmin" -p"$mdbpass";
+}
+
+vhost()	{
+
+	if [ "$stack" = lamp ]; then
+
+		< /etc/apache2/vhosts/a2.vhost envsubst '$fqdn $backendport' |		# substitute current variables in read vhost
+		sudo tee /etc/apache2/sites-available/"$fqdn".conf > /dev/null
+
+		< /etc/nginx/blocks/ngx.srvblock envsubst '$fqdn $upstream' |		# substitute current variables in read vhost
+		sudo tee /etc/nginx/sites-available/"$fqdn" > /dev/null
+
+		# a vhost pinned to a non-default pool carries its own handler
+		if [ -n "$phpalt" ]; then
+
+			< /etc/apache2/vhosts/a2.phost envsubst '$phpalt' |
+			sudo tee --append /etc/apache2/sites-available/"$fqdn".conf > /dev/null
+		fi
+	else
+		< /etc/nginx/blocks/ngx.phpblock envsubst '$fqdn $phpvrs' |		# substitute current variables in read vhost
+		sudo tee /etc/nginx/sites-available/"$fqdn" > /dev/null
+	fi
+}
+
+whost()	{
+
+	if [ "$stack" = lamp ]; then
+
+		< /etc/apache2/vhosts/a2.whost envsubst '$fqdn $backendport' |		# substitute current variables in read vhost
+		sudo tee --append /etc/apache2/sites-available/"$fqdn".conf > /dev/null
+	fi
+
+	< /etc/nginx/blocks/ngx.srwblock envsubst '$fqdn' |				# substitute current variable in read vhost
+	sudo tee --append /etc/nginx/sites-available/"$fqdn" > /dev/null
+}
+
+getcert() {
+
+	sudo certbot certonly --nginx --non-interactive --agree-tos --quiet -m "$certmail" -d "$fqdn$veveve" ||
+		{
+			echo -e "\n ${bred}Certbot errored out${cln}"
+			exit 1
+		}
+
+	echo -e "${cyn}$fqdn${cln} SSL Certificate ${grn}installed${cln}\n"
+}
+
+# Provision one domain. An apex domain also gets the www redirect, a subdomain
+# only gets the plain vhost.
+entld_one() {
+
+	if ! validdomain; then								# if the argument is not a domain
+
+		echo -e "\n ${bred} Wrong domain format.${cln}  ${red} Try again. ${cln}\n"	# print error
+		return 1
+	fi
+
+	if [ "$(artifacts)" -gt 0 ]; then						# vhost, webroot, database or ftp account
+
+		echo -e "\n ${cyn}$fqdn${cln} is already ${red}provisioned${cln} on this box. Use distld first.\n"
+		return 1
+	fi
+
+	if [[ "$fqdn" = *.*.* ]]; then							# if a subdomain exists
+
+		veveve=""
+		genpass
+		vhost
+		echo
+		getcert
+		dircnf
+
+	else										# apex, validdomain already guaranteed the dot
+
+		veveve=",www.$fqdn"
+		genpass
+		vhost
+		whost
+		echo
+		getcert
+		dircnf
+	fi
+}
+
+
+##
+# Flags
+##
+
+while getopts ":p:h" flag; do
+
+	case "${flag}" in
+
+		p)	phpalt=$OPTARG							# pin this vhost to a non-default fpm pool
+			# shellcheck disable=SC2034  # consumed by envsubst in vhost()
+			phpvrs=$OPTARG
+		;;
+
+		h)	echo -e "\nentld usage: \n\n-p <version> run these vhosts on a non-default php-fpm pool; \nfqdn [fqdn ...] domains to provision\n"
+			exit 0
+		;;
+
+		*)	echo -e "\n ${bred} Error! Invalid option${cln}${red} -$OPTARG${cln} \n"
+			exit 1
+		;;
+	esac
+done
+
+shift $((OPTIND - 1))
+
+
+##
+# Script
+##
+
+if [ -z "$mdbpass" ]; then
+
+	echo -e "\n ${bred}No MariaDB password found in /root/salt${cln}\n"
+	exit 1
+fi
+
+if [ -n "$phpalt" ] && ! command -v "php-fpm$phpalt" &>/dev/null; then
+
+	echo -e "\n ${bred}php-fpm$phpalt is not installed${cln}\n"
+	exit 1
+fi
+
+if [[ "$*" == "" ]]; then								# if no arguments
+
+	echo
+
+	read -r -p "Enter domain name: " fqdn						# ask for domain and read input
+
+	entld_one || exit 1
+
+else											# if arguments exist
+
+	for fqdn in "$@"; do								# for each argument
+
+		entld_one || exit 1
+	done
+fi
+
+sudo lampstart										# reload the stack
+sudo cat /root/salt

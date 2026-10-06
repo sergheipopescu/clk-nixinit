@@ -1,0 +1,6 @@
+
+
+# Route this vhost to a non-default php-fpm pool
+<FilesMatch \.php$>
+	SetHandler "proxy:unix:/run/php/php$phpalt-fpm.sock|fcgi://localhost"
+</FilesMatch>

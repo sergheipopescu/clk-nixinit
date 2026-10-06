@@ -1,0 +1,6 @@
+
+
+<VirtualHost *:$backendport>
+	ServerName www.$fqdn
+	Redirect / https://$fqdn
+</VirtualHost>

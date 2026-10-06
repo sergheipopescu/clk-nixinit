@@ -1,0 +1,4 @@
+# clk-nixinit shellcheck configuration
+# Modules source lib/common.sh through a path relative to their own location.
+source-path=SCRIPTDIR
+external-sources=true

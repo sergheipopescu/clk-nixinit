@@ -1,0 +1,45 @@
+###
+# Admin tooling served from any vhost, restricted to the allowlist
+##
+
+	location /php.MA/ {
+		alias /usr/share/phpmyadmin/;
+		index index.php;
+		include /etc/nginx/snippets/clk.ngx.acl.snip;
+
+		location ~ ^/php\.MA/(.+\.php)$ {
+			alias /usr/share/phpmyadmin/$1;
+			include snippets/fastcgi-php.conf;
+			fastcgi_pass unix:/run/php/php$phpvrs-fpm.sock;
+		}
+	}
+
+	location = /php.MA/setup {
+		return 404;
+	}
+
+	location = /php.info {
+		alias /var/www/wildcard/info.php;
+		include /etc/nginx/snippets/clk.ngx.acl.snip;
+		include snippets/fastcgi-php.conf;
+		fastcgi_pass unix:/run/php/php$phpvrs-fpm.sock;
+	}
+
+	location = /php.cache {
+		alias /var/www/wildcard/cache.php;
+		include /etc/nginx/snippets/clk.ngx.acl.snip;
+		include snippets/fastcgi-php.conf;
+		fastcgi_pass unix:/run/php/php$phpvrs-fpm.sock;
+	}
+
+	location /php.CA/ {
+		alias /var/www/wildcard/phpCacheAdmin/;
+		index index.php;
+		include /etc/nginx/snippets/clk.ngx.acl.snip;
+
+		location ~ ^/php\.CA/(.+\.php)$ {
+			alias /var/www/wildcard/phpCacheAdmin/$1;
+			include snippets/fastcgi-php.conf;
+			fastcgi_pass unix:/run/php/php$phpvrs-fpm.sock;
+		}
+	}

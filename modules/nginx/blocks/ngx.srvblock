@@ -1,0 +1,111 @@
+#	proxy_cache_path /var/cache/ngx.$fqdn levels=1:2 keys_zone=$fqdn:16m			# cache settings
+#			       max_size=10g inactive=60m use_temp_path=off;			# cache settings
+
+server {											# start HTTPs server block
+
+	server_name $fqdn;									# domain bindings
+
+
+	###
+	## SSL Settings
+	###
+
+	listen 443 ssl;										# default SSL port
+#	listen 9443 ssl proxy_protocol;								# proxy SSL port
+	ssl_certificate /etc/letsencrypt/live/$fqdn/fullchain.pem;				# SSL certificate
+	ssl_certificate_key /etc/letsencrypt/live/$fqdn/privkey.pem;				# SSL private key
+
+
+	###
+	## Real IP (if using proxy_protocol)
+	###
+
+#	set_real_ip_from 127.0.0.1;								# Set real IP
+#	real_ip_header proxy_protocol;								# Real IP header
+
+
+	###
+	## Logging
+	###
+
+	include /etc/nginx/snippets/clk.ngx.lognone.snip;					# logging exclusions / activated by snippet
+	access_log /var/log/nginx/$fqdn.443.access.log loghost if=$mainlog;			# access log
+	error_log /var/log/nginx/$fqdn.443.error.log error;					# error log
+	access_log /var/log/nginx/$fqdn.444.blockbots.log loghost if=$return_444;		# 444 returns log / activated by snippet
+
+
+
+	###
+	## nginx Bad Bot Blocker configs
+	###
+
+	include /etc/nginx/bots.d/ddos.conf;
+	include /etc/nginx/bots.d/blockbots.conf;
+
+
+	###
+	## Proxy cache directives
+	###
+
+#	proxy_cache $fqdn;									# cache settings
+#	proxy_cache_revalidate on;								# cache settings
+#	proxy_cache_min_uses 2;									# cache settings
+#	proxy_cache_valid any 60m;								# cache settings
+#	add_header X-Proxy-Cache $upstream_cache_status; # for testing, can be disabled in prod	# cache settings
+#	proxy_ignore_headers Cache-Control;							# cache CAREFUL settings
+#	proxy_cache_lock on; 									# TO TEST post deployment
+
+
+	###
+	## Access list
+	###
+
+#        include /etc/nginx/snippets/clk.ngx.acl.snip;
+
+
+	###
+	## Forward all requests to backend
+	###
+
+	location / {
+		proxy_pass $upstream;							# forward to upstream server
+	}
+
+}												# end of HTTPs block
+
+
+
+server {											# start of HTTP block
+
+	server_name $fqdn;									# server name
+
+	listen 80;										# HTTP port
+
+
+	###
+	## Logging
+	###
+
+	include /etc/nginx/snippets/clk.ngx.lognone.snip;						# logging exclusions / activated by snippet
+	access_log /var/log/nginx/$fqdn.80.access.log loghost if=$mainlog;			# access log
+	error_log /var/log/nginx/$fqdn.80.error.log error;					# error log
+	access_log /var/log/nginx/$fqdn.804.blockbots.log loghost if=$return_444;		# 444 returns log / activated by snippet
+
+
+	###
+	## Nginx Bad Bot Blocker Includes
+	###
+
+	include /etc/nginx/bots.d/ddos.conf;
+	include /etc/nginx/bots.d/blockbots.conf;
+
+
+	###
+	## Redirect all requests to https
+	###
+	
+	location / {
+		return 301 https://$fqdn$request_uri;
+	}
+
+}												# end of HTTP block

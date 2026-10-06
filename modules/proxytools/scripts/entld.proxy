@@ -1,0 +1,145 @@
+#!/bin/bash
+#
+# clk-nixinit :: entld.proxy
+# enable tld on a proxy - the front door for adding a domain to this box.
+# Both modes ask for the same thing: where the traffic actually goes.
+#
+#   -l   local  - HAProxy hands 443 to nginx here, nginx terminates TLS and
+#                 forwards to the backend you give it
+#   -r   remote - HAProxy passes 443 straight through to the backend, TLS
+#                 intact, and nginx gets a port 80 forward to the same place
+#                 so http has somewhere to go too
+#
+# usage: entld.proxy -l <fqdn>[,<fqdn>...] | -r | -h
+
+###
+## Variables
+###
+
+cln=$(echo -en '\033[0m')
+red=$(echo -en '\033[0;31m')
+grn=$(echo -en '\033[32m')
+cyn=$(echo -en '\033[36m')
+bred=$(echo -en '\033[1;91m')
+
+help() {
+
+	echo
+	echo -e "entld.proxy usage: \n\n-r for remote proxy (interactive); \n-l <fqdn.example.org> for local proxy, comma separated for several; \n-h displays this help\n\nBoth modes ask for the backend the domain should reach."
+	echo
+}
+
+# A real domain name, so a typo or an empty argument never reaches the config
+validdomain() {
+
+	[[ $1 =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$ ]]
+}
+
+validport() {
+
+	[[ $1 =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
+
+# Where does this domain's traffic actually go. Asked the same way for both
+# modes -- only what is done with the answer differs.
+askbackend() {
+
+	remdn=""; rempt=""
+
+	while [ -z "$remdn" ]; do read -r -p "	Enter remote server [IP/fqdn]: " remdn; done
+
+	while ! validport "$rempt"; do
+
+		read -r -p "	Enter remote port [integer]: " rempt
+
+		validport "$rempt" || echo -e "	${bred}Not a port number${cln}"
+	done
+}
+
+
+###
+## Script
+###
+
+echo
+
+while getopts ":l:hr" flag; do
+
+	case "${flag}" in
+
+	r)	if ! command -v haproxy &>/dev/null; then
+
+			echo -e "HAProxy is not installed"
+			echo
+			exit 1
+		fi
+
+		fqdn=""
+		while ! validdomain "$fqdn"; do
+
+			read -r -p "	Enter domain name [fqdn]: " fqdn
+
+			validdomain "$fqdn" || echo -e "	${bred}Not a domain${cln}"
+		done
+
+		askbackend
+		read -r -n 1 -p "	Enable proxy protocol [y/N]: " pxy; echo
+
+		echo
+		read -p $"	Route ${grn}$fqdn${cln} through to ${grn}$remdn:$rempt${cln}?  > " -r -n 1
+		echo
+
+		if [[ $REPLY =~ ^[Yy] ]]; then
+
+			# 443 passes through to the remote, untouched
+			CLK_HPX_FQDN=$fqdn CLK_HPX_REMOTE=$remdn CLK_HPX_PORT=$rempt \
+			CLK_HPX_PROXYPROTO=${pxy:-n} entld.hpx -r
+
+			# and port 80 reaches the same host, so the remote can serve
+			# or redirect it -- HAProxy only ever binds 443
+			if command -v entld.ngx &>/dev/null; then
+
+				entld.ngx -8 -b "http://$remdn" "$fqdn"
+			fi
+		fi
+	;;
+
+	l)	# split only this list, rather than setting IFS for the whole script
+		IFS=',' read -r -a fqdns <<< "$OPTARG"
+
+		for fqdn in "${fqdns[@]}"; do
+
+			if ! validdomain "$fqdn"; then
+
+				echo -e " $fqdn	- ${bred} Wrong domain format.${cln}  ${red} Try again. ${cln}"
+				continue
+			fi
+
+			echo -e "	Backend for ${cyn}$fqdn${cln}:"
+			askbackend
+			echo
+
+			# nginx terminates TLS here, so the backend goes into its
+			# server block rather than into a HAProxy backend
+			entld.hpx -l "$fqdn"
+			entld.ngx -b "http://$remdn:$rempt" "$fqdn"
+		done
+	;;
+
+	h)	help
+	;;
+
+	:)	help
+	;;
+
+	*) 	echo -e "\n ${bred} Error! Invalid option${cln}${red} -$OPTARG${cln} \n"
+		exit 1
+	;;
+	esac
+
+done
+
+if [ "$#" == 0 ]; then
+	help
+	exit 1
+fi

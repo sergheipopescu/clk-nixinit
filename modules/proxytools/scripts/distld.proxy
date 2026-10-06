@@ -1,0 +1,186 @@
+#!/bin/bash
+#
+# clk-nixinit :: distld.proxy
+# disable tld on a proxy - the inverse of entld.proxy. Works out on its own
+# whether a domain is local or remote and unwinds whichever it is:
+#
+#   local   drops the SNI entry (and its www), the nginx server block and the
+#           certificate
+#   remote  drops the map entry, and the backend file too once no other domain
+#           still points at it
+#
+# usage: distld.proxy [fqdn ...]
+
+###
+## Variables
+###
+
+cln=$(echo -en '\033[0m')
+red=$(echo -en '\033[0;31m')
+grn=$(echo -en '\033[32m')
+ylw=$(echo -en '\033[33m')
+cyn=$(echo -en '\033[36m')
+bred=$(echo -en '\033[1;91m')
+
+domap=/etc/haproxy/remotedomains.map
+domfile=/etc/haproxy/localdomains.file
+hpxdir=/etc/haproxy/conf.d
+
+# A real domain name -- without this an empty argument would turn the sed
+# deletions below into something that matches far more than intended
+validdomain() {
+
+	[[ $1 =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$ ]]
+}
+
+# Exact field matches, never regex -- the dots in a domain are wildcards to a
+# regex and would match more domains than the one asked for
+islocal() {
+
+	awk -v d="$1" '$1 == d {found = 1} END {exit !found}' "$domfile" 2>/dev/null
+}
+
+isremote() {
+
+	awk -v d="$1" '$1 == d {found = 1} END {exit !found}' "$domap" 2>/dev/null
+}
+
+backendof() {
+
+	awk -v d="$1" '$1 == d {print $2; exit}' "$domap" 2>/dev/null
+}
+
+mapuses() {
+
+	awk -v b="$1" '$2 == b {found = 1} END {exit !found}' "$domap" 2>/dev/null
+}
+
+# Drop a whole line by exact match, leaving everything else untouched
+dropline() {
+
+	local name=$1 file=$2 tmp
+	tmp=$(mktemp)
+	awk -v d="$name" '$1 != d' "$file" > "$tmp" && cat "$tmp" > "$file"
+	rm -f "$tmp"
+}
+
+hpxtest() {
+
+	haproxy -c -f /etc/haproxy/haproxy.cfg -f "$hpxdir" >/dev/null 2>&1
+}
+
+hpxreload() {
+
+	if hpxtest; then
+
+		systemctl reload haproxy
+		echo -e "HAProxy ${grn}reloaded${cln}\n"
+	else
+		echo -e "\n ${bred}HAProxy config test failed. Nothing reloaded, fix it and retry:${cln}\n"
+		haproxy -c -f /etc/haproxy/haproxy.cfg -f "$hpxdir"
+		exit 1
+	fi
+}
+
+# Everything nginx and certbot hold for this domain
+dropsite() {
+
+	local name=$1
+
+	rm -f /etc/nginx/sites-enabled/"$name"
+	rm -f /etc/nginx/sites-available/"$name"
+	rm -rf /etc/letsencrypt/archive/"$name"
+	rm -rf /etc/letsencrypt/live/"$name"
+	rm -f /etc/letsencrypt/renewal/"$name".conf
+}
+
+belete() {
+
+	local fqdn=$1 backend touched=0
+
+	if ! validdomain "$fqdn"; then
+
+		echo -e "\n ${bred} Wrong domain format.${cln}  ${red} Nothing removed. ${cln}\n"
+		return 1
+	fi
+
+	# Local: SNI entry, its www, the server block and the certificate
+	if islocal "$fqdn"; then
+
+		dropline "$fqdn" "$domfile"
+		dropsite "$fqdn"
+		echo -e "${cyn}$fqdn${cln} local entry and server block ${grn}removed${cln}"
+
+		if islocal "www.$fqdn"; then
+
+			dropline "www.$fqdn" "$domfile"
+			echo -e "${cyn}www.$fqdn${cln} local entry ${grn}removed${cln}"
+		fi
+
+		touched=1
+	fi
+
+	# Remote: map entry, and the backend once nothing else points at it
+	if isremote "$fqdn"; then
+
+		backend=$(backendof "$fqdn")
+		dropline "$fqdn" "$domap"
+		echo -e "${cyn}$fqdn${cln} map entry ${grn}removed${cln}"
+
+		# entld.proxy -r also leaves a port 80 forward block behind
+		if [ -f /etc/nginx/sites-available/"$fqdn" ]; then
+
+			dropsite "$fqdn"
+			echo -e "${cyn}$fqdn${cln} port 80 forward block ${grn}removed${cln}"
+		fi
+
+		if [ -n "$backend" ]; then
+
+			if mapuses "$backend"; then
+
+				echo -e "Backend ${cyn}$backend${cln} still used by another domain, ${ylw}kept${cln}"
+			else
+				rm -f "$hpxdir"/backend-"${backend//[^a-zA-Z0-9.-]/_}".cfg
+				echo -e "Backend ${cyn}$backend${cln} ${grn}removed${cln}"
+			fi
+		fi
+
+		touched=1
+	fi
+
+	if [ "$touched" -eq 0 ]; then
+
+		echo -e "\n ${cyn}$fqdn${cln} is not on this box. ${red}Nothing removed.${cln}\n"
+		return 1
+	fi
+
+	echo
+	hpxreload
+
+	command -v lampstart &>/dev/null && lampstart				# reload nginx too, if it is here
+}
+
+
+###
+## Script
+###
+
+if [[ "$*" == "" ]]; then								# if no arguments
+
+	echo
+
+	read -r -p "Enter domain name: " fqdn
+
+	echo
+
+	belete "$fqdn" || exit 1
+
+else											# if arguments exist
+
+	for fqdn in "$@"; do								# for each argument
+
+		echo
+
+		belete "$fqdn" || exit 1
+	done
+fi

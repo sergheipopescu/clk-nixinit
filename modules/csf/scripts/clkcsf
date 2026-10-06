@@ -1,0 +1,185 @@
+#!/bin/bash
+
+###
+## Variables and functions
+###
+
+csfdir=/etc/csf
+
+
+csfr () {
+
+	csf -r |  grep "Error\|*WARNING*"
+}
+
+readport() {
+
+	grep "$direction" "$csfdir/csf.conf" | cut -d'"' -f 2
+}
+
+writeport() {
+
+#	readport=$(grep "$direction" "$csfdir/csf.conf" | cut -d'"' -f 2)					# read current port list
+	portsort=$(echo "$(readport)",$((10#${port})) | tr ',' '\n' | sort -n | uniq | paste -sd',' -)	# append new port, sort port numbers, remove duplicates
+	sed -i "/$direction/c$direction \"${portsort}\"" "$csfdir/csf.conf"					# write
+	echo
+	echo -e "Port number \033[0;36m$((10#${port}))\033[0m opened"
+}
+
+
+openport() {
+
+	for port in $OPTARG; do
+
+		if [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then		# check if argument is a port number
+
+			writeport
+#			csfr
+		else
+			echo
+			echo -e "\n \033[1;91m Wrong port number format:\033[0m\033[0;31m $port\033[0m"		# print error
+			echo
+		fi
+	done
+}
+
+
+function valid_ip() {
+
+	local  ip=$1
+	local  stat=1
+
+	if [[ $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+		OIFS=$IFS
+ 		IFS='.'
+		# shellcheck disable=SC2206
+		ip=($ip)
+		IFS=$OIFS
+		[[ ${ip[0]} -le 255 && ${ip[1]} -le 255 \
+		&& ${ip[2]} -le 255 && ${ip[3]} -le 255 ]]
+		stat=$?
+	fi
+	return $stat
+}
+
+
+addip () {
+
+	for ipaddr in $OPTARG; do
+
+		if valid_ip "$ipaddr"; then
+
+			if grep -q "$ipaddr" "$csfdir/$csfile"; then
+
+				:
+
+			else
+				echo
+				echo -e "$ipaddr" | tee --append "$csfdir/$csfile" > /dev/null
+				echo -e "\n \033[1;92m Successfully\033[0m added $ipaddr to $csfile"
+#				csfr
+			fi
+
+		else
+			echo
+			echo -e "\n \033[1;91m Wrong ip address format:\033[0m\033[0;31m $ipaddr\033[0m"
+
+		fi
+	done
+}
+
+
+help () {
+
+	echo
+	echo -e "clkcsf usage: \n\n-i <incomig port>; \n-o <outgoing port>; \n-g <ignore IP>; \n-a <allow IP>; \n-p displays ignored/allowed IPs; \n-t displays open ports; \n-r restarts CSF and LFD services; \n-h displays this help"
+	echo
+}
+
+IFS=","
+
+###
+## Flags
+###
+
+while getopts ":a:g:i:o:hprt" flag; do
+
+	case "${flag}" in
+
+		i) 	direction="TCP_IN = "
+			openport
+			echo
+			csfr
+			echo -e "Currently \033[0;32mopen\033[0m incoming ports: $(readport)"
+			echo
+		;;
+
+		o) 	direction="TCP_OUT = "
+			openport
+			echo
+			csfr
+			echo -e "Currently \033[0;32mopen\033[0m outgoing ports: $(readport)"
+			echo
+		;;
+
+		g) 	csfile=csf.ignore
+			addip
+			echo
+			echo
+			systemctl restart csf lfd
+			csfr
+			echo -e "Currently \033[0;33mignored\033[0m IP addresses:"
+			grep -v '#'  "$csfdir/$csfile"
+			echo
+		;;
+
+		a)	csfile=csf.allow
+			addip
+			echo
+			echo
+			csfr
+			echo -e "Currently \033[0;32mallowed\033[0m IP addresses:"
+			grep -v '#'  "$csfdir/$csfile"
+			echo
+		;;
+
+                t)      csfile=csf.conf
+                        echo
+                        grep -iR "TCP_IN = " "$csfdir/$csfile"
+                        echo
+                        grep -iR "TCP_OUT = " "$csfdir/$csfile"
+			echo
+                ;;
+
+                p)      echo
+                        echo
+                        echo -e "Currently \033[0;33mignored\033[0m IP addresses:"
+                        grep -v '#'  "$csfdir/csf.ignore"
+                        echo
+                        echo
+                        echo -e "Currently \033[0;32mallowed\033[0m IP addresses:"
+                        grep -v '#'  "$csfdir/csf.allow"
+                        echo
+                ;;
+
+		r)	systemctl restart csf lfd
+			echo -e "\nCSF & LFD restarted!"
+		;;
+
+		h)	help
+		;;
+
+		:)	help
+		;;
+
+		*) 	echo -e "\n \033[1;91m Error! Invalid option\033[0m\033[0;31m -$OPTARG\033[0m \n"
+			exit
+		;;
+	esac
+
+done
+
+if [ "$#" == 0 ]; then
+	help
+	exit 1
+fi

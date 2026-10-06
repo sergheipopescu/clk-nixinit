@@ -1,0 +1,229 @@
+#!/bin/bash
+# shellcheck disable=SC2016  # envsubst wants the literal placeholder names
+#
+# clk-nixinit :: passtld
+# password tld - roll the database and ftp password of a domain entld has
+# already provisioned. Both accounts share a single password, the way entld
+# issues them, so both are rolled together.
+#
+# With -p the password is typed in instead of generated. Nothing needs
+# reloading afterwards: pure-ftpd reads its passwords out of the database on
+# every login, and ALTER USER takes effect immediately.
+#
+# usage: passtld [-p] [-h] [fqdn ...]
+
+##
+# Variables
+##
+
+set -a											# export all variables
+
+clkprofile=/etc/clickwork/nixinit.conf							# install profile
+
+cln=$(echo -en '\033[0m')
+red=$(echo -en '\033[0;31m')
+grn=$(echo -en '\033[32m')
+ylw=$(echo -en '\033[33m')
+cyn=$(echo -en '\033[36m')
+bred=$(echo -en '\033[1;91m')
+
+askpw=no										# -p types a password instead of generating
+
+profile_get() {
+
+	[ -f "$clkprofile" ] || { echo "$2"; return 0; }
+	local val
+	val=$(sed -n "s/^$1=\"\(.*\)\"$/\1/p" "$clkprofile" | tail -n 1)
+	echo "${val:-$2}"
+}
+
+mdbpass=$(sudo grep -oP "mariaDB password is:\s+\K\w+" /root/salt)			# get MariaDB root password
+mdbadmin=$(profile_get mariadb_admin mariadmin)						# mariadb superuser
+
+
+##
+# Functions
+##
+
+# A real domain name, so a typo or an empty argument can never reach the SQL
+validdomain() {
+
+	[[ $fqdn =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$ ]]
+}
+
+# Count what actually exists under this name. A typo would otherwise report
+# success after an UPDATE that matched no rows.
+countdb() {
+
+	mariadb -u"$mdbadmin" -p"$mdbpass" -N -B \
+		-e "SELECT COUNT(*) FROM mysql.user WHERE User='$fqdn' AND Host='localhost';" 2>/dev/null
+}
+
+countftp() {
+
+	mariadb -u"$mdbadmin" -p"$mdbpass" -N -B \
+		-e "SELECT COUNT(*) FROM pftpd.ftpd WHERE User='$fqdn';" 2>/dev/null
+}
+
+# Read a password twice, hidden. Quotes and backslashes are refused rather than
+# escaped, because how they have to be escaped depends on the server sql_mode.
+askpass() {
+
+	local p1 p2
+
+	while :; do
+
+		read -r -s -p "	New password for $fqdn: " p1; echo
+		read -r -s -p "	Repeat it: " p2; echo
+
+		if [ -z "$p1" ]; then
+
+			echo -e "	${ylw}Empty password, try again${cln}\n"
+
+		elif [ "$p1" != "$p2" ]; then
+
+			echo -e "	${ylw}They do not match, try again${cln}\n"
+
+		elif [[ $p1 == *[\"\'\\\`]* ]]; then
+
+			echo -e "	${ylw}Quotes, backslashes and backticks are not accepted, try again${cln}\n"
+		else
+			fqdnpass=$p1
+			break
+		fi
+	done
+}
+
+# Take the typed password or roll a random one, hash it, record the pair
+makepass() {
+
+	if [ "$askpw" = yes ]; then
+
+		askpass
+	else
+		fqdnpass=$(openssl rand -base64 15)					# create random password for database/ftp
+	fi
+
+	sodium=$(echo "$RANDOM" | md5sum | head -c 20)					# create random salt for argon2
+	argon=$(echo -n "$fqdnpass" | argon2 "$sodium" -id | grep Encoded | awk '{ print $2}')	# create argon2 hash of the password
+
+	# appended, never rewritten - the ledger is a history, so the dated comment
+	# is what marks which of a domain's pairs is the live one
+	echo -e "\n# $(date '+%F %T') password change for $fqdn\nThe $fqdn password is:	$fqdnpass\nThe $fqdn argon hash is:	$argon" | sudo tee --append /root/salt > /dev/null;
+}
+
+setdbpass() {
+
+	echo -e 'ALTER USER `$fqdn`@"localhost" IDENTIFIED BY "$fqdnpass";
+		FLUSH PRIVILEGES;
+	'| envsubst | mariadb -u"$mdbadmin" -p"$mdbpass";
+}
+
+setftppass() {
+
+	echo -e 'UPDATE pftpd.ftpd SET Password = "$argon" WHERE User = "$fqdn";
+	'| envsubst | mariadb -u"$mdbadmin" -p"$mdbpass";
+}
+
+# Roll one domain. Nothing is generated or typed until we know there is
+# something to change, so a bad name never lands a stray pair in the ledger.
+passtld_one() {
+
+	local dbn ftpn
+
+	if ! validdomain; then								# if the argument is not a domain
+
+		echo -e "\n ${bred} Wrong domain format.${cln}  ${red} Try again. ${cln}\n"
+		return 1
+	fi
+
+	dbn=$(countdb)
+	ftpn=$(countftp)
+
+	if [ "${dbn:-0}" -eq 0 ] && [ "${ftpn:-0}" -eq 0 ]; then			# nothing provisioned under that name
+
+		echo -e "\n ${cyn}$fqdn${cln} has no database user and no ftp account. ${red}Nothing changed.${cln}\n"
+		return 1
+	fi
+
+	makepass
+
+	if [ "${dbn:-0}" -gt 0 ]; then
+
+		setdbpass || { echo -e "\n ${bred}Database password change failed${cln}\n"; return 1; }
+		echo -e "${cyn}$fqdn${cln} database password ${grn}changed${cln}"
+	else
+		echo -e "${cyn}$fqdn${cln} has no database user, ${ylw}skipped${cln}"
+	fi
+
+	if [ "${ftpn:-0}" -gt 0 ]; then
+
+		setftppass || { echo -e "\n ${bred}FTP password change failed${cln}\n"; return 1; }
+		echo -e "${cyn}$fqdn${cln} ftp password ${grn}changed${cln}"
+	else
+		echo -e "${cyn}$fqdn${cln} has no ftp account, ${ylw}skipped${cln}"
+	fi
+
+	# a typed password stays off the screen, it is in the ledger either way
+	if [ "$askpw" = yes ]; then
+
+		echo -e "\n	Password for ${cyn}$fqdn${cln} set ${grn}as entered${cln}\n"
+	else
+		echo -e "\n	New password for ${cyn}$fqdn${cln} is	${grn}$fqdnpass${cln}\n"
+	fi
+}
+
+
+##
+# Flags
+##
+
+while getopts ":ph" flag; do
+
+	case "${flag}" in
+
+		p)	askpw=yes							# type the password instead of generating one
+		;;
+
+		h)	echo -e "\npasstld usage: \n\n-p             type the password instead of generating one; \nfqdn [fqdn ...] roll the database and ftp password of each domain\n\nBoth accounts share one password. The new pair is appended to /root/salt.\nNothing needs reloading - pure-ftpd reads passwords from the database per login.\n"
+			exit 0
+		;;
+
+		*)	echo -e "\n ${bred} Error! Invalid option${cln}${red} -$OPTARG${cln} \n"
+			exit 1
+		;;
+	esac
+done
+
+shift $((OPTIND - 1))
+
+
+##
+# Script
+##
+
+if [ -z "$mdbpass" ]; then
+
+	echo -e "\n ${bred}No MariaDB password found in /root/salt${cln}\n"
+	exit 1
+fi
+
+if [[ "$*" == "" ]]; then								# if no arguments
+
+	echo
+
+	read -r -p "Enter domain name: " fqdn						# ask for domain and read input
+
+	echo
+
+	passtld_one || exit 1
+
+else											# if arguments exist
+
+	for fqdn in "$@"; do								# for each argument
+
+		echo
+
+		passtld_one || exit 1
+	done
+fi

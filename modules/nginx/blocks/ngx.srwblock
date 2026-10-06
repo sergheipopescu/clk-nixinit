@@ -1,0 +1,58 @@
+
+
+
+
+server {																			# start www redirect block
+
+	server_name www.$fqdn;									# server name
+
+	listen 80;										# HTTP port							# HTTP port
+	listen 443 ssl;										# default SSL port
+#	listen 9443 ssl proxy_protocol;								# proxy SSL port
+	ssl_certificate /etc/letsencrypt/live/$fqdn/fullchain.pem;				# SSL certificate
+	ssl_certificate_key /etc/letsencrypt/live/$fqdn/privkey.pem;				# SSL private key
+
+
+	###
+	## Real IP (if using proxy_protocol)
+	###
+
+#	set_real_ip_from 127.0.0.1;								# Set real IP
+#	real_ip_header proxy_protocol;								# Real IP header
+
+
+	###
+	## Logging
+	###
+
+	include /etc/nginx/snippets/clk.ngx.lognone.snip;						# logging exclusions / activated by snippet
+	access_log /var/log/nginx/$fqdn.www.access.log loghost if=$mainlog;			# access log
+	error_log /var/log/nginx/$fqdn.www.error.log error;					# error log
+	access_log /var/log/nginx/$fqdn.www.blockbots.log combined if=$return_444;		# 444 returns log / activated by snippet
+
+
+	###
+	## Nginx Bad Bot Blocker Includes
+	###
+
+	include /etc/nginx/bots.d/ddos.conf;
+	include /etc/nginx/bots.d/blockbots.conf;
+
+
+	###
+	## Access list
+	###
+
+#        include /etc/nginx/snippets/clk.ngx.acl.snip;
+
+
+	###
+	## Redirect all requests to non-www
+	###
+	
+	location / {
+		return 301 https://$fqdn$request_uri;
+	}
+
+
+}												# end of www block

@@ -1,0 +1,127 @@
+#!/bin/bash
+# shellcheck disable=SC2016  # envsubst wants the literal placeholder names
+#
+# clk-nixinit :: distld
+# disable the domain - the exact inverse of entld: drops the vhosts, the webroot,
+# the certificate, the database and the ftp account.
+#
+# usage: distld [fqdn ...]
+
+##
+# Variables
+##
+
+set -a											# export all variables
+
+clkprofile=/etc/clickwork/nixinit.conf							# install profile
+
+cln=$(echo -en '\033[0m')
+red=$(echo -en '\033[0;31m')
+grn=$(echo -en '\033[32m')
+cyn=$(echo -en '\033[36m')
+bred=$(echo -en '\033[1;91m')
+
+profile_get() {
+
+	[ -f "$clkprofile" ] || { echo "$2"; return 0; }
+	local val
+	val=$(sed -n "s/^$1=\"\(.*\)\"$/\1/p" "$clkprofile" | tail -n 1)
+	echo "${val:-$2}"
+}
+
+mdbpass=$(sudo grep -oP "mariaDB password is:\s+\K\w+" /root/salt)			# get MariaDB root password
+mdbadmin=$(profile_get mariadb_admin mariadmin)						# mariadb superuser
+
+
+##
+# Functions
+##
+
+# A real domain name. Without this an empty argument turns every rm below into
+# a wildcard against the parent directory -- rm -rf /var/www/ would take every
+# hosted site on the box with it.
+validdomain() {
+
+	[[ $fqdn =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$ ]]
+}
+
+# How much of this domain is still on the box. distld is a cleanup tool, so it
+# runs whenever any piece survives -- a stale database after a failed teardown
+# is exactly what it is for -- and only refuses when there is nothing at all.
+artifacts() {
+
+	local n=0 dbn ftpn
+
+	[ -f /etc/nginx/sites-available/"$fqdn" ] && n=$((n + 1))
+	[ -f /etc/apache2/sites-available/"$fqdn".conf ] && n=$((n + 1))
+	[ -d /var/www/"$fqdn" ] && n=$((n + 1))
+	[ -d /etc/letsencrypt/live/"$fqdn" ] && n=$((n + 1))
+
+	dbn=$(mariadb -u"$mdbadmin" -p"$mdbpass" -N -B \
+		-e "SELECT COUNT(*) FROM mysql.user WHERE User='$fqdn' AND Host='localhost';" 2>/dev/null)
+	ftpn=$(mariadb -u"$mdbadmin" -p"$mdbpass" -N -B \
+		-e "SELECT COUNT(*) FROM pftpd.ftpd WHERE User='$fqdn';" 2>/dev/null)
+
+	echo $((n + ${dbn:-0} + ${ftpn:-0}))
+}
+
+belete() {
+
+	if ! validdomain; then								# if the argument is not a domain
+
+		echo -e "\n ${bred} Wrong domain format.${cln}  ${red} Nothing removed. ${cln}\n"
+		return 1
+	fi
+
+	if [ "$(artifacts)" -eq 0 ]; then						# nothing of this domain is on the box
+
+		echo -e "\n ${cyn}$fqdn${cln} is not on this box. ${red}Nothing removed.${cln}\n"
+		return 1
+	fi
+
+	rm -f /etc/nginx/sites-available/"$fqdn"
+	rm -f /etc/nginx/sites-enabled/"$fqdn"
+	rm -f /etc/apache2/sites-available/"$fqdn".conf
+	rm -f /etc/apache2/sites-enabled/"$fqdn".conf
+	rm -rf /var/www/"$fqdn"
+	rm -rf /etc/letsencrypt/archive/"$fqdn"
+	rm -rf /etc/letsencrypt/live/"$fqdn"
+	rm -f /etc/letsencrypt/renewal/"$fqdn".conf
+
+	# The database, the db user and the ftp row all go with it
+	echo -e 'DROP DATABASE IF EXISTS `$fqdn`;
+		DROP USER IF EXISTS `$fqdn`@"localhost";
+		DELETE FROM pftpd.ftpd WHERE User = "$fqdn";
+		FLUSH PRIVILEGES;
+	'| envsubst | mariadb -u"$mdbadmin" -p"$mdbpass";
+
+	echo -e "\n${cyn}$fqdn${cln} ${grn}removed${cln}\n"
+}
+
+
+##
+# Script
+##
+
+if [ -z "$mdbpass" ]; then
+
+	echo -e "\n ${bred}No MariaDB password found in /root/salt${cln}\n"
+	exit 1
+fi
+
+if [[ "$*" == "" ]]; then								# if no arguments
+
+	echo
+
+	read -r -p "Enter domain name: " fqdn
+
+	belete || exit 1
+
+else
+	for fqdn in "$@"; do
+
+		belete || exit 1
+	done
+fi
+
+sudo lampstart										# reload the stack so the site actually goes away

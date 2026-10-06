@@ -1,0 +1,41 @@
+## Map 444 status to return_444 variable
+
+	map $status $return_444 {
+		444 1;
+		default 0;
+	}
+
+## Map to exclude different statuses from the main log
+
+	map $status $mainlog {
+		444 0;
+		default 1;
+	}
+
+## Map 405 status to return_405 variable
+
+	map $status $return_405 {
+		405 1;
+		default 0;
+	}
+
+## Map request method to allow head variable
+
+	map $request_method:$allow_head $return_405 {
+		"HEAD:0" 1;
+	}
+
+## Geo HEAD allowed list
+
+	geo $allow_head {
+		default 0;
+		188.241.112.238 1;
+	}
+
+## Geo ACLs
+
+	geo $remote_addr $allowed_IPs {
+
+		default false;
+		include /etc/nginx/snippets/clk.ngx.acl.IPs.snip;
+	}

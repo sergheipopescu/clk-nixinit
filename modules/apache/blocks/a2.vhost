@@ -1,0 +1,7 @@
+<VirtualHost *:$backendport>
+	ServerAdmin postmaster@$fqdn
+	ServerName $fqdn
+	DocumentRoot /var/www/$fqdn/
+	ErrorLog /var/log/apache2/${fqdn}_errors.log
+	CustomLog /var/log/apache2/${fqdn}_access.log loghost
+</VirtualHost>

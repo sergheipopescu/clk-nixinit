@@ -1,0 +1,215 @@
+#!/bin/bash
+#
+# clk-nixinit :: entld.hpx
+# enable tld, HAProxy flavour - registers a domain with the SNI router, either
+# as local (terminated by nginx on this box) or remote (passed through to
+# another server).
+#
+# Generated backends are written one per file into /etc/haproxy/conf.d, never
+# into haproxy.cfg, so nothing here ever edits the shipped config and
+# distld.proxy can drop a backend by deleting a file.
+#
+# usage: entld.hpx -l <fqdn> | -r | -h
+
+###
+## Variables
+###
+
+cln=$(echo -en '\033[0m')
+red=$(echo -en '\033[0;31m')
+grn=$(echo -en '\033[32m')
+ylw=$(echo -en '\033[33m')
+cyn=$(echo -en '\033[36m')
+bred=$(echo -en '\033[1;91m')
+
+domap=/etc/haproxy/remotedomains.map
+domfile=/etc/haproxy/localdomains.file
+hpxdir=/etc/haproxy/conf.d
+
+help() {
+
+	echo
+	echo -e "entld.hpx usage: \n\n-r for remote proxy (interactive); \n-l <fqdn.example.org> for local proxy; \n-h displays this help"
+	echo
+}
+
+# A real domain name, so a typo or an empty argument never reaches the config
+validdomain() {
+
+	[[ $1 =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$ ]]
+}
+
+# Whole-line match. A substring grep would see sub.example.ro and wrongly
+# report that example.ro is already registered.
+hasline() {
+
+	grep -qxF "$1" "$2" 2>/dev/null
+}
+
+# Is this domain already mapped. Exact match on the first field -- a regex
+# would treat the dots in the domain as wildcards.
+mapped() {
+
+	awk -v d="$1" '$1 == d {found = 1} END {exit !found}' "$domap" 2>/dev/null
+}
+
+# Does any map entry still point at this backend
+mapuses() {
+
+	awk -v b="$1" '$2 == b {found = 1} END {exit !found}' "$domap" 2>/dev/null
+}
+
+# HAProxy has no include directive but -f takes a directory, and the unit gets
+# conf.d as a second -f. Test exactly what systemd will load.
+hpxtest() {
+
+	haproxy -c -f /etc/haproxy/haproxy.cfg -f "$hpxdir" >/dev/null 2>&1
+}
+
+# Reload only after the config actually parses, so a bad backend can never take
+# the router down
+hpxreload() {
+
+	if hpxtest; then
+
+		systemctl reload haproxy
+		echo -e "HAProxy ${grn}reloaded${cln}\n"
+	else
+		echo -e "\n ${bred}HAProxy config test failed. Nothing reloaded, fix it and retry:${cln}\n"
+		haproxy -c -f /etc/haproxy/haproxy.cfg -f "$hpxdir"
+		exit 1
+	fi
+}
+
+
+###
+## Script
+###
+
+while getopts ":l:hr" flag; do
+
+	case "${flag}" in
+
+	r)	# entld.proxy prompts once and drives both tools, so anything it
+		# already asked for arrives here pre-set and is not asked again
+		fqdn=${CLK_HPX_FQDN:-}
+		remdn=${CLK_HPX_REMOTE:-}
+		rempt=${CLK_HPX_PORT:-}
+		pxy=${CLK_HPX_PROXYPROTO:-}
+
+		echo
+		[ -n "$fqdn" ]  || read -r -p "Enter domain name [fqdn]: " fqdn
+		[ -n "$remdn" ] || read -r -p "Enter remote server [IP/fqdn]: " remdn
+		[ -n "$rempt" ] || read -r -p "Enter remote port [integer]: " rempt
+		[ -n "$pxy" ]   || { read -r -n 1 -p "Enable proxy protocol [y/N]: " pxy; echo; }
+
+		if ! validdomain "$fqdn"; then
+
+			echo -e "\n ${bred} Wrong domain format.${cln}  ${red} Try again. ${cln}\n"
+			exit 1
+		fi
+
+		if [ -z "$remdn" ]; then
+
+			echo -e "\n ${bred} No remote server given.${cln}\n"
+			exit 1
+		fi
+
+		if ! [[ $rempt =~ ^[0-9]+$ ]] || [ "$rempt" -lt 1 ] || [ "$rempt" -gt 65535 ]; then
+
+			echo -e "\n ${bred} Wrong port number:${cln}${red} $rempt ${cln}\n"
+			exit 1
+		fi
+
+		sdn="${remdn%%.*}"								# strip domain name from fqdn
+		bkfile=$hpxdir/backend-${remdn//[^a-zA-Z0-9.-]/_}.cfg				# one file per backend
+
+		if [[ $pxy =~ ^[Yy] ]]; then							# proxy protocol enabled/disabled variable
+
+			pxy=" send-proxy-v2-ssl"
+		else
+			pxy=""
+		fi
+
+		# a caller that supplied the answers has already confirmed them
+		if [ -n "${CLK_HPX_FQDN:-}" ]; then
+
+			REPLY=y
+		else
+			echo
+			read -p  $"     Enable HAProxy for ${grn}$fqdn${cln} routed to backend ${grn}$remdn${cln}?  > " -r -n 1
+			echo
+		fi
+
+		if [[ $REPLY =~ ^[Yy] ]]; then
+
+		# Check for fqdn map #
+			if mapped "$fqdn"; then
+
+				echo -e "\nDomain map ${ylw}exists${cln}\n\nBackend ${red}NOT${cln} created\n"
+				exit 0
+			fi
+
+			printf '%s\t%s\n' "$fqdn" "$remdn" | tee -a "$domap" >/dev/null
+			echo -e "\nDomain map ${grn}created${cln}\n"
+
+		# Check for backend #
+			if [ -f "$bkfile" ]; then
+
+				echo -e "Backend ${ylw}exists${cln}\n"
+			else
+				printf 'backend %s\n     server %s %s:%s check sni req.ssl_sni%s\n' \
+					"$remdn" "$sdn" "$remdn" "$rempt" "$pxy" > "$bkfile"
+				echo -e "Backend ${grn}created${cln} in $bkfile\n"
+			fi
+
+			hpxreload
+		fi
+	;;
+
+	l)	fqdn=$OPTARG
+
+		if ! validdomain "$fqdn"; then
+
+			echo -e "\n ${bred} Wrong domain format.${cln}  ${red} Try again. ${cln}\n"
+			exit 1
+		fi
+
+		# An apex domain also answers on www, and the SNI ACL matches whole
+		# lines -- without this the www vhost entld.ngx builds would be
+		# rejected by the router before it ever reached nginx.
+		names=("$fqdn")
+		[[ "$fqdn" = *.*.* ]] || names+=("www.$fqdn")
+
+		for name in "${names[@]}"; do
+
+			if hasline "$name" "$domfile"; then
+
+				echo -e "Domain ${cyn}$name${cln} ${ylw}exists${cln} in the local list"
+			else
+				echo "$name" | tee -a "$domfile" >/dev/null
+				echo -e "Domain ${cyn}$name${cln} ${grn}added${cln} to the local list"
+			fi
+		done
+
+		echo
+		hpxreload
+	;;
+
+	h)	help
+	;;
+
+	:)	help
+	;;
+
+	*) 	echo -e "\n ${bred} Error! Invalid option${cln}${red} -$OPTARG${cln} \n"
+		exit 1
+	;;
+	esac
+
+done
+
+if [ "$#" == 0 ]; then
+	help
+	exit 1
+fi
