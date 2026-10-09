@@ -168,11 +168,11 @@ ask_role() {
 	echo
 	echo "	What should this server become?"
 	echo
+	echo "	0) ${grn}Min${cln}   - customization only, removes ufw, no firewall or mail"
 	echo "	1) ${red}Core${cln}  - customization, firewall and outbound mail only"
 	echo "	2) ${ylw}LAMP${cln}  - apache + mariadb + php, behind an ${grn}nginx${cln} front end"
 	echo "	3) ${ylw}LEMP${cln}  - ${grn}nginx${cln} only, serving php-fpm directly + mariadb"
 	echo "	4) ${cyn}Proxy${cln} - reverse proxy, ${grn}nginx${cln} + ${ylw}HAProxy${cln}"
-	echo "	5) ${grn}Min${cln}   - customization only, removes ufw, no firewall or mail"
 	echo
 
 	while :; do
@@ -182,11 +182,11 @@ ask_role() {
 
 		case "$reply" in
 
+			0)	role=min	; break ;;
 			''|1)	role=core	; break ;;			# bare Enter takes the default
 			2)	role=lamp	; break ;;
 			3)	role=lemp	; break ;;
 			4)	role=proxy	; break ;;
-			5)	role=min	; break ;;
 			*)	echo -e "	${bred}Bad${cln} choice, try again\n" ;;
 		esac
 	done
@@ -260,7 +260,7 @@ clear											# clear the screen
 echo "${cyn}"
 echo "		##############################################"
 echo "		##       Clickwork Ubuntu provisioner       ##"
-printf '		##  %-38s##\n' "v$version  -  Ubuntu $(distro_version) on $(virt_label)"
+printf '		##  %-40s##\n' "v$version  -  Ubuntu $(distro_version) on $(virt_label)"
 echo "		##############################################"
 echo "${cln}"
 

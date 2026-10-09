@@ -91,7 +91,7 @@ spinopen() {
 	local fifo
 	fifo=$(mktemp -u) || return 1
 	mkfifo "$fifo" 2>/dev/null || return 1
-	exec {spinfd}<>"$fifo" 2>/dev/null || { rm -f "$fifo"; return 1; }
+	{ exec {spinfd}<>"$fifo"; } 2>/dev/null || { rm -f "$fifo"; return 1; }	# braces keep the 2>/dev/null from sticking to the whole shell
 	rm -f "$fifo"									# unlinked, our own fd keeps it alive
 }
 
@@ -178,7 +178,7 @@ banner() {
 
 	echo "${cyn}"
 	echo "		##############################################"
-	printf '		##  %-38s##\n' "$1"
+	printf '		##  %-40s##\n' "$1"
 	echo "		##############################################"
 	echo "${cln}"
 	echo
