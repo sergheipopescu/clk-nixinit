@@ -123,7 +123,7 @@ step "Fetching ssh keys from github"
 if [[ -n $githubuser ]]; then
 	ghkeys=$(mktemp)								# scratch file for the downloaded keys
 
-	if wget -q -O "$ghkeys" "https://github.com/$githubuser.keys" && [[ -s $ghkeys ]]; then
+	if wget -nv -O "$ghkeys" "https://github.com/$githubuser.keys" >>"$clklog" 2>&1 && [[ -s $ghkeys ]]; then	# errors go to the log
 		for keyhome in /root /home/"$adminuser"; do				# root and the sudo user
 
 			mkdir -p "$keyhome"/.ssh
@@ -200,7 +200,10 @@ okay
 # established session survives the restart, only new connections see the
 # change, so this is the same operation admins run by hand to switch port.
 step "Restarting ssh on port $sshport"
+systemctl disable --now ssh.socket >>"$clklog" 2>&1 || :				# socket activation owns port 22 and makes sshd ignore Port, older releases have none
+systemctl enable ssh >>"$clklog" 2>&1							# sshd listens by itself from here on
 systemctl restart ssh >>"$clklog" 2>&1 || fail
+ss -tlnp >>"$clklog" 2>&1								# what is listening, for the log if the checks below fail
 ss -tln 2>/dev/null | grep -q ":$sshport " || fail					# must be listening on the new port
 ss -tln 2>/dev/null | grep -q ':22 ' && fail						# and must not still be listening on 22
 okay
