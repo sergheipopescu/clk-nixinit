@@ -26,7 +26,7 @@ moddir=$rootdir/modules									# module directory
 # shellcheck source=lib/common.sh
 . "$rootdir"/lib/common.sh
 
-version=1.0-alpha1
+version=1.0-alpha2
 
 
 ##
