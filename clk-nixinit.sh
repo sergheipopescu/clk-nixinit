@@ -373,6 +373,10 @@ done
 # Finish
 ##
 
+# Sweep up whatever the modules and the ufw removal left orphaned
+step "Removing unused packages"
+makespin_soft "DEBIAN_FRONTEND=noninteractive apt-get -y autoremove --purge"
+
 profile_set role "$role"
 profile_set installed_on "$(date '+%F %T')"
 
